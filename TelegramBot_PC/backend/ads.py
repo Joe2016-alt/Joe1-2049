@@ -19,7 +19,7 @@ AD_MANIFEST_URL = os.environ.get(
     "FLIX_AD_MANIFEST",
     "https://raw.githubusercontent.com/Joe2016-alt/Joe1-2049/main/ads/ads.json",
 )
-AD_INTERVAL = 3600  # 1 ad per hour
+AD_INTERVAL = 900  # 1 ad per 15 minutes
 
 _manifest_lock = threading.Lock()
 _manifest_cache = {"val": None, "ts": 0.0}
