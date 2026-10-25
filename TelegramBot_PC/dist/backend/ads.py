@@ -17,7 +17,7 @@ import urllib.request
 # Remote manifest with per-section ad entries. Overridable per deployment.
 AD_MANIFEST_URL = os.environ.get(
     "FLIX_AD_MANIFEST",
-    "https://raw.githubusercontent.com/Joe-2049/Flixy/main/ads/ads.json",
+    "https://raw.githubusercontent.com/Joe2016-alt/Joe1-2049/main/ads/ads.json",
 )
 AD_INTERVAL = 900  # 1 ad per 15 minutes
 
@@ -59,7 +59,14 @@ class AdService:
     def __init__(self, root):
         self.root = os.path.join(root, "ads")
         self.state_file = os.path.join(root, "ads_state.json")
+        # Last good manifest, kept outside the clip dir so _drop_stale can't
+        # delete it. Lets the gate answer instantly (and offline) on later boots.
+        self.manifest_file = os.path.join(root, "ads_manifest.json")
         self._lock = threading.Lock()
+        # Launch ad is per PROCESS, not per install: the persisted
+        # "launch_acked" used to be written once and honoured forever, so the
+        # gate only ever showed on the very first boot after installing.
+        self._launch_acked = False
         try:
             os.makedirs(self.root, exist_ok=True)
         except Exception:
@@ -86,46 +93,97 @@ class AdService:
         except Exception:
             pass
 
+    def _fetch_json(self, url, timeout=4):
+        """GET a manifest URL.
+
+        The manifest is remote control data (it decides what the client
+        downloads and opens), so only our own raw.githubusercontent.com
+        content is trusted -- a stray env override must not be able to point
+        the client at an arbitrary server.
+        """
+        if not _is_trusted_manifest_url(url):
+            print(f"[ads] refusing untrusted manifest host: {url}", flush=True)
+            return None
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "FlixAds/1.0", "Cache-Control": "no-cache"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                m = json.loads(r.read().decode("utf-8", "replace"))
+            return m if isinstance(m, dict) and m else None
+        except Exception:
+            return None
+
+    def _load_cached_manifest(self):
+        try:
+            with open(self.manifest_file, "r", encoding="utf-8") as f:
+                m = json.load(f)
+            return m if isinstance(m, dict) and m else None
+        except Exception:
+            return None
+
+    def _save_cached_manifest(self, m):
+        try:
+            tmp = self.manifest_file + ".part"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(m, f)
+            os.replace(tmp, self.manifest_file)
+        except Exception:
+            pass
+
+    def start_warm(self):
+        """Fetch the manifest off the request thread.
+
+        The launch gate is the first caller of /api/ads, so without a warm
+        thread it pays the entire network cost and can pop up ~20s into the
+        session instead of at launch.
+        """
+        def _run():
+            try:
+                self.fetch_manifest()
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True, name="ads-warm").start()
+
     def fetch_manifest(self):
         now = time.time()
         with _manifest_lock:
             if _manifest_cache["val"] and now - _manifest_cache["ts"] < 120:
                 return _manifest_cache["val"]
-        m = None
-        # Try the configured manifest first, then let repo_hub find whichever
-        # GitHub repo is live. Without this the ad stream would die the moment
-        # the primary repo is blocked, even though a replacement already
-        # matches one of the known naming patterns.
-        urls = [AD_MANIFEST_URL]
-        try:
-            import repo_hub
-            alt = repo_hub.ads_manifest_url(repo_hub.active(want_assets=False))
-            if alt and alt not in urls:
-                urls.append(alt)
-        except Exception as e:
-            print(f"[ads] repo failover unavailable: {e}", flush=True)
 
-        for url in urls:
-            # The manifest is remote control data. Only fetch it from the hosts
-            # we control (raw.githubusercontent.com) so a stray env override
-            # cannot point the client at an arbitrary server.
-            if not _is_trusted_manifest_url(url):
-                print(f"[ads] refusing untrusted manifest host: {url}", flush=True)
-                continue
+        # 1) The configured manifest is the normal path and must stay cheap.
+        #    repo_hub.active() walks GitHub candidates and measured ~20s, so it
+        #    is only consulted when the primary is genuinely unreachable.
+        m = self._fetch_json(AD_MANIFEST_URL)
+
+        # 2) Failover: find whichever replacement repo is live.
+        if not m:
             try:
-                req = urllib.request.Request(
-                    url,
-                    headers={"User-Agent": "FlixAds/1.0", "Cache-Control": "no-cache"},
-                )
-                with urllib.request.urlopen(req, timeout=6) as r:
-                    m = json.loads(r.read().decode("utf-8", "replace"))
-                if m:
-                    break
-            except Exception:
-                m = None
-        with _manifest_lock:
-            if m:
+                import repo_hub
+                alt = repo_hub.ads_manifest_url(repo_hub.active(want_assets=False))
+                if alt and alt != AD_MANIFEST_URL:
+                    m = self._fetch_json(alt)
+            except Exception as e:
+                print(f"[ads] repo failover unavailable: {e}", flush=True)
+
+        if m:
+            with _manifest_lock:
                 _manifest_cache["val"] = m
+                _manifest_cache["ts"] = now
+            self._save_cached_manifest(m)
+            return m
+
+        # 3) Offline / blocked: reuse the last good copy so the compulsory gate
+        #    still has something to show instead of silently disappearing.
+        cached = self._load_cached_manifest()
+        if cached:
+            with _manifest_lock:
+                _manifest_cache["val"] = cached
+                _manifest_cache["ts"] = now
+            return cached
+
+        with _manifest_lock:
             _manifest_cache["ts"] = now
         return _manifest_cache["val"]
 
@@ -137,7 +195,10 @@ class AdService:
         duration = int(ad.get("duration") or 0)
         ad_type = str(ad.get("type") or "video").lower()
         click_url = ad.get("click_url") or ad.get("href") or ad.get("redirect_url") or ad.get("url_redirect") or ""
-        image_url = ad.get("image") or ad.get("banner") or ad.get("src") or ad.get("thumb") or ""
+        # "image_url" is the key the published manifest actually uses; the
+        # shorter aliases are kept for hand-written manifests.
+        image_url = (ad.get("image_url") or ad.get("image") or ad.get("banner")
+                     or ad.get("src") or ad.get("thumb") or "")
 
         # Popunder/redirect/banner ads
         if ad_type in ("link", "redirect", "popunder", "banner", "image"):
@@ -218,10 +279,11 @@ class AdService:
             pass
 
     def require(self):
-        """Enforce cadence: launch-ad until acked, then one per hour."""
+        """Enforce cadence: one compulsory ad at every launch, then one per
+        AD_INTERVAL (15 min)."""
         now = int(time.time())
         st = self._state()
-        launch_acked = bool(st.get("launch_acked"))
+        launch_acked = self._launch_acked
         last_h = int(st.get("last_hourly") or 0)
         if not launch_acked:
             return {
@@ -242,9 +304,11 @@ class AdService:
         st = self._state()
         now = int(time.time())
         if rtype == "launch":
-            st["launch_acked"] = True
+            self._launch_acked = True
             st["last_hourly"] = now
         elif rtype == "hourly":
             st["last_hourly"] = now
+        # Drop the legacy key so a stale True can never leak into a future read.
+        st.pop("launch_acked", None)
         self._save_state(st)
         return self.require()
