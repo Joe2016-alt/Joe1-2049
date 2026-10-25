@@ -29,6 +29,53 @@ _manifest_cache = {"val": None, "ts": 0.0}
 # data: only our own raw.githubusercontent.com content is trusted.
 _TRUSTED_MANIFEST_HOSTS = ("raw.githubusercontent.com",)
 
+_ZONE_ID_RE = re.compile(r'data-zoneid\s*=\s*["\']?(\d+)', re.I)
+_ZONE_CLASS_RE = re.compile(r'<ins[^>]*\bclass\s*=\s*["\']([^"\']*)["\']', re.I)
+_ZONE_ANYCLASS_RE = re.compile(r'<[a-z][^>]*\bclass\s*=\s*["\']([^"\']*)["\']', re.I)
+_ZONE_SRC_RE = re.compile(r'<script[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']', re.I)
+_ZONE_DEFAULT_SRC = "https://a.magsrv.com/ad-provider.js"
+
+
+def _zone_from(ad):
+    """Normalize an ExoClick banner zone into the values the gate renders.
+
+    Same contract as portal.py::_zone_from: accept the tag pasted verbatim
+    ("zone_tag") or the structured form ("zone": {id, cls, src}), and hand the
+    page only the zone id + <ins> class + provider script URL. Raw HTML from a
+    remote manifest is never injected into the page.
+    """
+    if not isinstance(ad, dict):
+        return None
+    z = ad.get("zone")
+    zid = cls = src = ""
+    width, height = 300, 250
+    if isinstance(z, dict):
+        zid = str(z.get("id") or z.get("zone_id") or "").strip()
+        cls = str(z.get("class") or z.get("cls") or "").strip()
+        src = str(z.get("src") or z.get("script") or "").strip()
+        width = z.get("width") or width
+        height = z.get("height") or height
+    tag = ad.get("zone_tag") or (z if isinstance(z, str) else "")
+    if not zid and tag:
+        m = _ZONE_ID_RE.search(tag)
+        zid = m.group(1) if m else ""
+        m = _ZONE_CLASS_RE.search(tag) or _ZONE_ANYCLASS_RE.search(tag)
+        cls = m.group(1).strip() if m else ""
+        m = _ZONE_SRC_RE.search(tag)
+        src = m.group(1).strip() if m else ""
+    if not zid.isdigit():
+        return None
+    if src.startswith("//"):
+        src = "https:" + src
+    if not src.startswith("https://"):
+        src = _ZONE_DEFAULT_SRC
+    try:
+        width = max(120, min(970, int(width)))
+        height = max(60, min(640, int(height)))
+    except (TypeError, ValueError):
+        width, height = 300, 250
+    return {"id": zid, "cls": cls, "src": src, "width": width, "height": height}
+
 
 def _is_trusted_manifest_url(url):
     try:
@@ -211,6 +258,10 @@ class AdService:
                 "type": ad_type,
                 "click_url": click_url,
                 "image_url": image_url,
+                # ExoClick banner zone (CPM). When present the gate renders the
+                # network's own creative, so the impression is a real, paid ad
+                # request instead of a self-hosted image behind a redirect.
+                "zone": _zone_from(ad),
             }
 
         # The manifest supplies the filename, so treat it as untrusted and keep
