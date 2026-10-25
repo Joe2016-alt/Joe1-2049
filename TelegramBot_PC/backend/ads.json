@@ -1,0 +1,31 @@
+{
+  "version": 12,
+  "ads": {
+    "launch": {
+      "type": "popunder",
+      "click_url": "https://s.pemsrv.com/v1/link.php?cat=&idzone=6064478&type=8",
+      "image_url": "https://raw.githubusercontent.com/Joe2016-alt/Joe1-2049/main/ads/app_banner.jpg",
+      "duration": 6
+    },
+    "hourly": {
+      "type": "popunder",
+      "click_url": "https://s.pemsrv.com/v1/link.php?cat=&idzone=6064478&type=8",
+      "image_url": "https://raw.githubusercontent.com/Joe2016-alt/Joe1-2049/main/ads/app_banner.jpg",
+      "duration": 6
+    }
+  },
+  "web": {
+    "enabled": true,
+    "cooldown_hours": 1,
+    "ads": [
+      {
+        "id": "exo_web_pop",
+        "type": "image",
+        "src": "https://raw.githubusercontent.com/Joe2016-alt/Joe1-2049/main/ads/app_banner.jpg",
+        "href": "https://flix.flixworld.in/adclick?id=exo_web_pop&r=https://s.pemsrv.com/v1/link.php?cat=&idzone=6064478&type=8",
+        "skip_after": 5,
+        "weight": 1
+      }
+    ]
+  }
+}
