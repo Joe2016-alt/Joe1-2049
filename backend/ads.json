@@ -16,7 +16,7 @@
   },
   "web": {
     "enabled": true,
-    "cooldown_hours": 1,
+    "cooldown_hours": 0.25,
     "ads": [
       {
         "id": "exo_web_pop",
